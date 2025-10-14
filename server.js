@@ -40,6 +40,17 @@ app.get("/files/:userId", (req, res) => {
     res.json(files);
   });
 });
+app.get("/admin/users", (req, res) => {
+  const uploadsPath = path.join(__dirname, "uploads");
+  if (!fs.existsSync(uploadsPath)) return res.json([]);
+
+  const users = fs.readdirSync(uploadsPath).filter((name) => {
+    const fullPath = path.join(uploadsPath, name);
+    return fs.statSync(fullPath).isDirectory();
+  });
+
+  res.json(users);
+});
 
 // 🗑️ Usuwanie pliku
 app.delete("/files/:userId/:fileName", (req, res) => {
