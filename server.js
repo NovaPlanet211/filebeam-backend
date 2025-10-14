@@ -17,9 +17,32 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
+
+const fs = require("fs");
+const path = require("path");
+
 app.post("/upload/:userId", upload.single("file"), (req, res) => {
-  res.send({ message: "Plik zapisany", filename: req.file.originalname });
+  const userId = req.params.userId;
+  const uploadPath = path.join(__dirname, "uploads", userId);
+
+  // Tworzy folder jeśli nie istnieje
+  if (!fs.existsSync(uploadPath)) {
+    fs.mkdirSync(uploadPath, { recursive: true });
+  }
+
+  // Przenosi plik do folderu użytkownika
+  const tempPath = req.file.path;
+  const targetPath = path.join(uploadPath, req.file.originalname);
+
+  fs.rename(tempPath, targetPath, (err) => {
+    if (err) {
+      console.error("Błąd przy zapisie pliku:", err);
+      return res.status(500).send("Błąd serwera");
+    }
+    res.send("Plik zapisany!");
+  });
 });
+
 
 app.get("/download/:userId/:filename", (req, res) => {
   const filePath = path.join(__dirname, "uploads", req.params.userId, req.params.filename);
