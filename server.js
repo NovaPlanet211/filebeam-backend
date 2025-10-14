@@ -51,6 +51,26 @@ app.get("/admin/users", (req, res) => {
 
   res.json(users);
 });
+app.get("/admin/users", (req, res) => {
+  const uploadsPath = path.join(__dirname, "uploads");
+  if (!fs.existsSync(uploadsPath)) return res.json([]);
+
+  const users = fs.readdirSync(uploadsPath).filter((name) => {
+    const fullPath = path.join(uploadsPath, name);
+    return fs.statSync(fullPath).isDirectory();
+  });
+
+  res.json(users);
+});
+const ADMIN_PASSWORD = "BadMojo2008";
+
+app.use("/admin", (req, res, next) => {
+  const password = req.headers["x-admin-password"];
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(403).send("Brak dostępu");
+  }
+  next();
+});
 
 // 🗑️ Usuwanie pliku
 app.delete("/files/:userId/:fileName", (req, res) => {
