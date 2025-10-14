@@ -76,7 +76,18 @@ app.delete("/files/:userId/:fileName", (req, res) => {
     res.send("Plik usunięty");
   });
 });
+app.delete("/admin/users/:userId", (req, res) => {
+  const userDir = path.join(__dirname, "uploads", req.params.userId);
+  if (!fs.existsSync(userDir)) return res.status(404).send("Użytkownik nie istnieje");
 
+  fs.rm(userDir, { recursive: true, force: true }, (err) => {
+    if (err) {
+      console.error("Błąd przy usuwaniu użytkownika:", err);
+      return res.status(500).send("Nie udało się usunąć użytkownika");
+    }
+    res.send("Użytkownik usunięty");
+  });
+});
 // 🌐 Serwowanie plików statycznie
 app.use("/files", express.static(path.join(__dirname, "uploads")));
 
