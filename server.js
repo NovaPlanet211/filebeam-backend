@@ -57,6 +57,18 @@ app.get("/files/:userId", (req, res) => {
   });
 });
 app.use("/files", express.static(path.join(__dirname, "uploads")));
+app.delete("/files/:userId/:fileName", (req, res) => {
+  const { userId, fileName } = req.params;
+  const filePath = path.join(__dirname, "uploads", userId, fileName);
+
+  fs.unlink(filePath, (err) => {
+    if (err) {
+      console.error("Błąd przy usuwaniu:", err);
+      return res.status(500).send("Nie udało się usunąć");
+    }
+    res.send("Plik usunięty");
+  });
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
