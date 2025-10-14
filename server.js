@@ -6,7 +6,18 @@ const cors = require("cors");
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // dla rejestracji użytkownika
+app.use(express.json());
+
+const ADMIN_PASSWORD = "BadMojo2008";
+
+// 🔐 Middleware do autoryzacji admina
+app.use("/admin", (req, res, next) => {
+  const password = req.headers["x-admin-password"];
+  if (password !== ADMIN_PASSWORD) {
+    return res.status(403).send("Brak dostępu");
+  }
+  next();
+});
 
 // 📁 Konfiguracja multer
 const storage = multer.diskStorage({
@@ -30,7 +41,7 @@ app.get("/download/:userId/:filename", (req, res) => {
   res.download(filePath);
 });
 
-// 📄 Lista plików
+// 📄 Lista plików użytkownika
 app.get("/files/:userId", (req, res) => {
   const dirPath = path.join(__dirname, "uploads", req.params.userId);
   if (!fs.existsSync(dirPath)) return res.status(404).send("Użytkownik nie istnieje");
@@ -40,6 +51,8 @@ app.get("/files/:userId", (req, res) => {
     res.json(files);
   });
 });
+
+// 👥 Lista użytkowników (folderów)
 app.get("/admin/users", (req, res) => {
   const uploadsPath = path.join(__dirname, "uploads");
   if (!fs.existsSync(uploadsPath)) return res.json([]);
@@ -50,26 +63,6 @@ app.get("/admin/users", (req, res) => {
   });
 
   res.json(users);
-});
-app.get("/admin/users", (req, res) => {
-  const uploadsPath = path.join(__dirname, "uploads");
-  if (!fs.existsSync(uploadsPath)) return res.json([]);
-
-  const users = fs.readdirSync(uploadsPath).filter((name) => {
-    const fullPath = path.join(uploadsPath, name);
-    return fs.statSync(fullPath).isDirectory();
-  });
-
-  res.json(users);
-});
-const ADMIN_PASSWORD = "BadMojo2008";
-
-app.use("/admin", (req, res, next) => {
-  const password = req.headers["x-admin-password"];
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(403).send("Brak dostępu");
-  }
-  next();
 });
 
 // 🗑️ Usuwanie pliku
