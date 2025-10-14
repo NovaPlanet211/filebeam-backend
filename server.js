@@ -33,6 +33,7 @@ app.get("/files/:userId", (req, res) => {
     res.json(files);
   });
 });
+app.use("/files", express.static(path.join(__dirname, "uploads")));
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
