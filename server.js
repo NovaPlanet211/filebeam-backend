@@ -6,10 +6,12 @@ const cors = require("cors");
 
 const app = express();
 app.use(cors());
+app.use(express.json()); // dla rejestracji użytkownika
 
+// 📁 Konfiguracja multer
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const userDir = `uploads/${req.params.userId}`;
+    const userDir = path.join(__dirname, "uploads", req.params.userId);
     fs.mkdirSync(userDir, { recursive: true });
     cb(null, userDir);
   },
@@ -17,50 +19,31 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-
-const fs = require("fs");
-const path = require("path");
-
+// 📤 Upload pliku
 app.post("/upload/:userId", upload.single("file"), (req, res) => {
-  const userId = req.params.userId;
-  const uploadPath = path.join(__dirname, "uploads", userId);
-
-  // Tworzy folder jeśli nie istnieje
-  if (!fs.existsSync(uploadPath)) {
-    fs.mkdirSync(uploadPath, { recursive: true });
-  }
-
-  // Przenosi plik do folderu użytkownika
-  const tempPath = req.file.path;
-  const targetPath = path.join(uploadPath, req.file.originalname);
-
-  fs.rename(tempPath, targetPath, (err) => {
-    if (err) {
-      console.error("Błąd przy zapisie pliku:", err);
-      return res.status(500).send("Błąd serwera");
-    }
-    res.send("Plik zapisany!");
-  });
+  res.send("Plik zapisany!");
 });
 
-
+// 📥 Pobieranie pliku
 app.get("/download/:userId/:filename", (req, res) => {
   const filePath = path.join(__dirname, "uploads", req.params.userId, req.params.filename);
   res.download(filePath);
 });
 
+// 📄 Lista plików
 app.get("/files/:userId", (req, res) => {
   const dirPath = path.join(__dirname, "uploads", req.params.userId);
+  if (!fs.existsSync(dirPath)) return res.status(404).send("Użytkownik nie istnieje");
+
   fs.readdir(dirPath, (err, files) => {
     if (err) return res.status(500).send("Błąd");
     res.json(files);
   });
 });
-app.use("/files", express.static(path.join(__dirname, "uploads")));
-app.delete("/files/:userId/:fileName", (req, res) => {
-  const { userId, fileName } = req.params;
-  const filePath = path.join(__dirname, "uploads", userId, fileName);
 
+// 🗑️ Usuwanie pliku
+app.delete("/files/:userId/:fileName", (req, res) => {
+  const filePath = path.join(__dirname, "uploads", req.params.userId, req.params.fileName);
   fs.unlink(filePath, (err) => {
     if (err) {
       console.error("Błąd przy usuwaniu:", err);
@@ -70,9 +53,24 @@ app.delete("/files/:userId/:fileName", (req, res) => {
   });
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Serwer działa port:${port}`);
+// 🌐 Serwowanie plików statycznie
+app.use("/files", express.static(path.join(__dirname, "uploads")));
+
+// 🆕 Rejestracja użytkownika
+app.post("/register", (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).send("Brak nazwy użytkownika");
+
+  const userPath = path.join(__dirname, "uploads", username);
+  if (fs.existsSync(userPath)) {
+    return res.status(409).send("Użytkownik już istnieje");
+  }
+
+  fs.mkdirSync(userPath, { recursive: true });
+  res.send("Użytkownik utworzony");
 });
 
-
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Serwer działa na porcie ${port}`);
+});
