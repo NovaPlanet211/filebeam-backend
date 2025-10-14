@@ -33,7 +33,10 @@ app.get("/files/:userId", (req, res) => {
     res.json(files);
   });
 });
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Serwer działa port:${port}`);
 });
+
+
