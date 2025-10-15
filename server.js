@@ -5,10 +5,7 @@ const path = require("path");
 const cors = require("cors");
 
 const app = express();
-app.use(cors({
-  origin: 'https://novaplanet211.github.io/filebeam-frontend/#/',
-  credentials: true
-}));
+app.use(cors());
 app.use(express.json());
 
 const ADMIN_PASSWORD = "BadMojo2008";
