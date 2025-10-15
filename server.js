@@ -41,6 +41,7 @@ app.post("/upload/:userId", upload.single("file"), (req, res) => {
 // 📥 Pobieranie pliku
 app.get("/download/:userId/:filename", (req, res) => {
   const filePath = path.join(__dirname, "uploads", req.params.userId, req.params.filename);
+  if (!fs.existsSync(filePath)) return res.status(404).send("Plik nie istnieje");
   res.download(filePath);
 });
 
@@ -51,7 +52,9 @@ app.get("/files/:userId", (req, res) => {
 
   fs.readdir(dirPath, (err, files) => {
     if (err) return res.status(500).send("Błąd");
-    res.json(files);
+    // filtrujemy plik user.json jeśli istnieje
+    const visibleFiles = files.filter(f => f !== "user.json");
+    res.json(visibleFiles);
   });
 });
 
@@ -71,6 +74,7 @@ app.get("/admin/users", (req, res) => {
 // 🗑️ Usuwanie pliku
 app.delete("/files/:userId/:fileName", (req, res) => {
   const filePath = path.join(__dirname, "uploads", req.params.userId, req.params.fileName);
+  if (!fs.existsSync(filePath)) return res.status(404).send("Plik nie istnieje");
   fs.unlink(filePath, (err) => {
     if (err) {
       console.error("Błąd przy usuwaniu:", err);
@@ -79,6 +83,7 @@ app.delete("/files/:userId/:fileName", (req, res) => {
     res.send("Plik usunięty");
   });
 });
+
 app.delete("/admin/users/:userId", (req, res) => {
   const userDir = path.join(__dirname, "uploads", req.params.userId);
   if (!fs.existsSync(userDir)) return res.status(404).send("Użytkownik nie istnieje");
@@ -91,37 +96,56 @@ app.delete("/admin/users/:userId", (req, res) => {
     res.send("Użytkownik usunięty");
   });
 });
+
 // 🌐 Serwowanie plików statycznie
 app.use("/files", express.static(path.join(__dirname, "uploads")));
 
-// 🆕 Rejestracja użytkownika
+// 🆕 Rejestracja użytkownika (z zapisem user.json)
 app.post("/register", (req, res) => {
-  const { username } = req.body;
-  if (!username) return res.status(400).send("Brak nazwy użytkownika");
+  const { username, password } = req.body;
+  if (!username || !password) return res.status(400).send("Brak nazwy użytkownika lub hasła");
 
   const userPath = path.join(__dirname, "uploads", username);
   if (fs.existsSync(userPath)) {
     return res.status(409).send("Użytkownik już istnieje");
   }
 
-  fs.mkdirSync(userPath, { recursive: true });
-  res.send("Użytkownik utworzony");
+  try {
+    fs.mkdirSync(userPath, { recursive: true });
+    // zapisujemy dane użytkownika do pliku user.json (prosty, bez hashowania)
+    const userData = { username, password };
+    fs.writeFileSync(path.join(userPath, "user.json"), JSON.stringify(userData));
+    res.status(201).send("Użytkownik utworzony");
+  } catch (e) {
+    console.error("Błąd przy tworzeniu użytkownika:", e);
+    res.status(500).send("Błąd serwera");
+  }
 });
-//logowanie
-app.post("/login", async (req, res) => {
+
+// logowanie (odczyt z user.json)
+app.post("/login", (req, res) => {
   const { username, password } = req.body;
+  if (!username || !password) return res.status(400).json({ error: "Brak danych" });
 
-  // znajdź użytkownika w bazie
-  const user = users.find(u => u.username === username);
-
-  if (!user || user.password !== password) {
-    return res.status(401).json({ error: "Nieprawidłowy login lub hasło" });
+  const userPath = path.join(__dirname, "uploads", username, "user.json");
+  if (!fs.existsSync(userPath)) {
+    return res.status(404).json({ error: "Użytkownik nie istnieje" });
   }
 
-  return res.status(200).json({ message: "Zalogowano" });
+  try {
+    const userData = JSON.parse(fs.readFileSync(userPath, "utf-8"));
+    if (userData.password !== password) {
+      return res.status(401).json({ error: "Nieprawidłowe hasło" });
+    }
+    return res.status(200).json({ message: "Zalogowano" });
+  } catch (e) {
+    console.error("Błąd przy logowaniu:", e);
+    return res.status(500).json({ error: "Błąd serwera" });
+  }
 });
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Serwer działa na porcie ${port}`);
 });
+
