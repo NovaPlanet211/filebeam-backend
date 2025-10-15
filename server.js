@@ -107,6 +107,19 @@ app.post("/register", (req, res) => {
   fs.mkdirSync(userPath, { recursive: true });
   res.send("Użytkownik utworzony");
 });
+//logowanie
+app.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+
+  // znajdź użytkownika w bazie
+  const user = users.find(u => u.username === username);
+
+  if (!user || user.password !== password) {
+    return res.status(401).json({ error: "Nieprawidłowy login lub hasło" });
+  }
+
+  return res.status(200).json({ message: "Zalogowano" });
+});
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
