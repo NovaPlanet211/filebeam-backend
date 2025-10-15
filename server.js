@@ -13,7 +13,7 @@ app.use(express.json());
 
 const ADMIN_PASSWORD = "BadMojo2008";
 
-// 🔐 Middleware do autoryzacji admina
+
 app.use("/admin", (req, res, next) => {
   const password = req.headers["x-admin-password"];
   if (password !== ADMIN_PASSWORD) {
@@ -22,7 +22,7 @@ app.use("/admin", (req, res, next) => {
   next();
 });
 
-// 📁 Konfiguracja multer
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const userDir = path.join(__dirname, "uploads", req.params.userId);
@@ -33,19 +33,19 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// 📤 Upload pliku
+
 app.post("/upload/:userId", upload.single("file"), (req, res) => {
   res.send("Plik zapisany!");
 });
 
-// 📥 Pobieranie pliku
+
 app.get("/download/:userId/:filename", (req, res) => {
   const filePath = path.join(__dirname, "uploads", req.params.userId, req.params.filename);
   if (!fs.existsSync(filePath)) return res.status(404).send("Plik nie istnieje");
   res.download(filePath);
 });
 
-// 📄 Lista plików użytkownika
+
 app.get("/files/:userId", (req, res) => {
   const dirPath = path.join(__dirname, "uploads", req.params.userId);
   if (!fs.existsSync(dirPath)) return res.status(404).send("Użytkownik nie istnieje");
@@ -58,7 +58,7 @@ app.get("/files/:userId", (req, res) => {
   });
 });
 
-// 👥 Lista użytkowników (folderów)
+
 app.get("/admin/users", (req, res) => {
   const uploadsPath = path.join(__dirname, "uploads");
   if (!fs.existsSync(uploadsPath)) return res.json([]);
@@ -71,7 +71,7 @@ app.get("/admin/users", (req, res) => {
   res.json(users);
 });
 
-// 🗑️ Usuwanie pliku
+
 app.delete("/files/:userId/:fileName", (req, res) => {
   const filePath = path.join(__dirname, "uploads", req.params.userId, req.params.fileName);
   if (!fs.existsSync(filePath)) return res.status(404).send("Plik nie istnieje");
@@ -97,10 +97,10 @@ app.delete("/admin/users/:userId", (req, res) => {
   });
 });
 
-// 🌐 Serwowanie plików statycznie
+
 app.use("/files", express.static(path.join(__dirname, "uploads")));
 
-// 🆕 Rejestracja użytkownika (z zapisem user.json)
+
 app.post("/register", (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).send("Brak nazwy użytkownika lub hasła");
@@ -122,7 +122,7 @@ app.post("/register", (req, res) => {
   }
 });
 
-// logowanie (odczyt z user.json)
+
 app.post("/login", (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: "Brak danych" });
