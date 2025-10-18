@@ -1,238 +1,294 @@
+// server.js
 const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
+const fsp = require("fs").promises;
 const path = require("path");
 const cors = require("cors");
+const compression = require("compression");
+
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "BadMojo2008";
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://novaplanet211.github.io";
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, "uploads"); // on Render, set to /data/uploads if persistent disk mounted
+const TRASH_DIR = process.env.TRASH_DIR || path.join(__dirname, "trash");       // on Render, set to /data/trash
+const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL_MS || "10000", 10);
+const PORT = process.env.PORT || 3000;
 
 const app = express();
-app.use(cors({
-  origin: 'https://novaplanet211.github.io',
-  credentials: true
-}));
+app.use(cors({ origin: ALLOWED_ORIGIN, credentials: true }));
 app.use(express.json());
+app.use(compression());
 
-const ADMIN_PASSWORD = "BadMojo2008";
+// Simple in-memory cache for file lists
+const fileCache = new Map();
 
-
-app.use("/admin", (req, res, next) => {
+// Admin middleware (used on /admin/* and cleanup endpoints)
+const adminMiddleware = (req, res, next) => {
   const password = req.headers["x-admin-password"];
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(403).send("Brak dostępu");
-  }
+  if (password !== ADMIN_PASSWORD) return res.status(403).send("Brak dostępu");
   next();
-});
+};
 
+// Ensure base directories exist
+const ensureDirs = async () => {
+  await fsp.mkdir(UPLOADS_DIR, { recursive: true });
+  await fsp.mkdir(TRASH_DIR, { recursive: true });
+};
 
+// Multer storage using userId param
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const userDir = path.join(__dirname, "uploads", req.params.userId);
-    fs.mkdirSync(userDir, { recursive: true });
-    cb(null, userDir);
+  destination: async (req, file, cb) => {
+    try {
+      const userDir = path.join(UPLOADS_DIR, req.params.userId);
+      await fsp.mkdir(userDir, { recursive: true });
+      cb(null, userDir);
+    } catch (err) {
+      cb(err);
+    }
   },
   filename: (req, file, cb) => cb(null, file.originalname),
 });
 const upload = multer({ storage });
 
-
-app.post("/upload/:userId", upload.single("file"), (req, res) => {
+// Upload endpoint
+app.post("/upload/:userId", upload.single("file"), async (req, res) => {
+  fileCache.delete(req.params.userId);
   res.send("Plik zapisany!");
 });
 
-
-app.get("/download/:userId/:filename", (req, res) => {
-  const filePath = path.join(__dirname, "uploads", req.params.userId, req.params.filename);
-  if (!fs.existsSync(filePath)) return res.status(404).send("Plik nie istnieje");
-  res.download(filePath);
+// Download endpoint (serves file without forcing attachment)
+app.get("/download/:userId/:filename", async (req, res) => {
+  const filePath = path.join(UPLOADS_DIR, req.params.userId, req.params.filename);
+  try {
+    await fsp.access(filePath);
+    res.sendFile(filePath);
+  } catch {
+    res.status(404).send("Plik nie istnieje");
+  }
 });
 
+// Static files (allow direct download links)
+app.use("/files", express.static(UPLOADS_DIR));
 
-app.get("/files/:userId", (req, res) => {
-  const { viewer } = req.query; // np. ?viewer=NovaUser
-  const targetUser = req.params.userId;
-
-  const targetDir = path.join(__dirname, "uploads", targetUser);
-  const viewerFile = viewer ? path.join(__dirname, "uploads", viewer, "user.json") : null;
-
-  if (!fs.existsSync(targetDir)) return res.status(404).send("Użytkownik nie istnieje");
-
-  // Jeśli użytkownik przegląda swoje pliki — zawsze OK
-  if (viewer === targetUser) {
-    const files = fs.readdirSync(targetDir).filter(f => f !== "user.json");
-    return res.json(files);
+// Helper: read user.json safely
+const readUserJson = async (username) => {
+  const file = path.join(UPLOADS_DIR, username, "user.json");
+  try {
+    const txt = await fsp.readFile(file, "utf-8");
+    return JSON.parse(txt);
+  } catch {
+    return null;
   }
+};
 
-  // Jeśli przegląda cudze pliki — sprawdź jego typ konta
-  if (!viewerFile || !fs.existsSync(viewerFile)) {
-    return res.status(403).send("Brak dostępu");
-  }
+// List files with access rules and caching
+app.get("/files/:userId", async (req, res) => {
+  const { viewer } = req.query;
+  const userId = req.params.userId;
+  const userDir = path.join(UPLOADS_DIR, userId);
 
   try {
-    const viewerData = JSON.parse(fs.readFileSync(viewerFile, "utf-8"));
-    if (viewerData.accountType === "anonimowe") {
-      return res.status(403).send("Konto anonimowe nie może przeglądać cudzych plików");
-    }
-
-    const files = fs.readdirSync(targetDir).filter(f => f !== "user.json");
-    return res.json(files);
-  } catch (e) {
-    console.error("Błąd przy sprawdzaniu konta:", e);
-    return res.status(500).send("Błąd serwera");
+    await fsp.access(userDir);
+  } catch {
+    return res.status(404).send("Użytkownik nie istnieje");
   }
-});
 
+  if (!viewer) return res.status(403).send("Brak dostępu");
 
+  if (viewer !== userId) {
+    const viewerData = await readUserJson(viewer);
+    if (!viewerData) return res.status(403).send("Brak dostępu");
+    if (viewerData.accountType === "anonimowe") return res.status(403).send("Konto anonimowe nie może przeglądać cudzych plików");
+  }
 
-app.get("/admin/users", (req, res) => {
-  const uploadsPath = path.join(__dirname, "uploads");
-  if (!fs.existsSync(uploadsPath)) return res.json([]);
-
-  const users = fs.readdirSync(uploadsPath).filter((name) => {
-    const fullPath = path.join(uploadsPath, name);
-    return fs.statSync(fullPath).isDirectory();
-  });
-
-  res.json(users);
-});
-
-app.get("/admin/pending-users", (req, res) => {
-  const uploadsPath = path.join(__dirname, "uploads");
-  if (!fs.existsSync(uploadsPath)) return res.json([]);
-
-  const pendingUsers = fs.readdirSync(uploadsPath).filter((name) => {
-    const userFile = path.join(uploadsPath, name, "user.json");
-    if (!fs.existsSync(userFile)) return false;
-    try {
-      const data = JSON.parse(fs.readFileSync(userFile, "utf-8"));
-      return data.accountType === "zatwierdzane" && data.status === "pending";
-    } catch {
-      return false;
-    }
-  });
-
-  res.json(pendingUsers);
-});
-
-
-app.delete("/files/:userId/:fileName", (req, res) => {
-  const filePath = path.join(__dirname, "uploads", req.params.userId, req.params.fileName);
-  if (!fs.existsSync(filePath)) return res.status(404).send("Plik nie istnieje");
-  fs.unlink(filePath, (err) => {
-    if (err) {
-      console.error("Błąd przy usuwaniu:", err);
-      return res.status(500).send("Nie udało się usunąć");
-    }
-    res.send("Plik usunięty");
-  });
-});
-
-app.delete("/admin/users/:userId", (req, res) => {
-  const userDir = path.join(__dirname, "uploads", req.params.userId);
-  if (!fs.existsSync(userDir)) return res.status(404).send("Użytkownik nie istnieje");
-
-  fs.rm(userDir, { recursive: true, force: true }, (err) => {
-    if (err) {
-      console.error("Błąd przy usuwaniu użytkownika:", err);
-      return res.status(500).send("Nie udało się usunąć użytkownika");
-    }
-    res.send("Użytkownik usunięty");
-  });
-});
-
-app.post("/admin/approve/:username", (req, res) => {
-  const userFile = path.join(__dirname, "uploads", req.params.username, "user.json");
-  if (!fs.existsSync(userFile)) return res.status(404).send("Użytkownik nie istnieje");
+  const now = Date.now();
+  const cached = fileCache.get(userId);
+  if (cached && now - cached.ts < CACHE_TTL_MS) return res.json(cached.files);
 
   try {
-    const userData = JSON.parse(fs.readFileSync(userFile, "utf-8"));
-    if (userData.accountType !== "zatwierdzane") {
-      return res.status(400).send("To konto nie wymaga zatwierdzenia");
-    }
-
-    userData.status = "active";
-    fs.writeFileSync(userFile, JSON.stringify(userData, null, 2));
-    res.send("Konto zatwierdzone");
-  } catch (e) {
-    console.error("Błąd przy zatwierdzaniu:", e);
+    const all = await fsp.readdir(userDir);
+    const visible = all.filter(f => f !== "user.json");
+    fileCache.set(userId, { files: visible, ts: now });
+    res.json(visible);
+  } catch {
     res.status(500).send("Błąd serwera");
   }
 });
 
+// Admin routes (protected by adminMiddleware)
+app.get("/admin/users", adminMiddleware, async (req, res) => {
+  try {
+    const entries = await fsp.readdir(UPLOADS_DIR, { withFileTypes: true });
+    const users = entries.filter(e => e.isDirectory()).map(e => e.name);
+    res.json(users);
+  } catch {
+    res.json([]);
+  }
+});
 
-app.use("/files", express.static(path.join(__dirname, "uploads")));
+app.get("/admin/pending-users", adminMiddleware, async (req, res) => {
+  try {
+    const entries = await fsp.readdir(UPLOADS_DIR, { withFileTypes: true });
+    const pending = [];
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const data = await readUserJson(e.name);
+      if (data && data.accountType === "zatwierdzane" && data.status === "pending") pending.push(e.name);
+    }
+    res.json(pending);
+  } catch {
+    res.json([]);
+  }
+});
 
+app.post("/admin/approve/:username", adminMiddleware, async (req, res) => {
+  const userFile = path.join(UPLOADS_DIR, req.params.username, "user.json");
+  try {
+    const txt = await fsp.readFile(userFile, "utf-8");
+    const data = JSON.parse(txt);
+    if (data.accountType !== "zatwierdzane") return res.status(400).send("To konto nie wymaga zatwierdzenia");
+    data.status = "active";
+    await fsp.writeFile(userFile, JSON.stringify(data, null, 2));
+    res.send("Konto zatwierdzone");
+  } catch (err) {
+    console.error("Błąd przy zatwierdzaniu:", err);
+    res.status(500).send("Błąd serwera");
+  }
+});
 
-app.post("/register", (req, res) => {
-  const { username, password, accountType, verificationCode } = req.body;
-
-  if (!username) return res.status(400).send("Brak loginu");
-
-  const userPath = path.join(__dirname, "uploads", username);
-  if (fs.existsSync(userPath)) {
-    return res.status(409).send("Użytkownik już istnieje");
+// Move single file to trash
+app.delete("/files/:userId/:fileName", adminMiddleware, async (req, res) => {
+  const { userId, fileName } = req.params;
+  const filePath = path.join(UPLOADS_DIR, userId, fileName);
+  try {
+    await fsp.access(filePath);
+  } catch {
+    return res.status(404).send("Plik nie istnieje");
   }
 
   try {
-    fs.mkdirSync(userPath, { recursive: true });
+    await fsp.mkdir(path.join(TRASH_DIR, userId), { recursive: true });
+    const timestamp = Date.now();
+    const dest = path.join(TRASH_DIR, userId, `${timestamp}__${fileName}`);
+    await fsp.rename(filePath, dest);
+    fileCache.delete(userId);
+    res.send("Plik przeniesiony do trash");
+  } catch (err) {
+    console.error("Błąd przy usuwaniu pliku:", err);
+    res.status(500).send("Nie udało się usunąć pliku");
+  }
+});
 
+// Move user to trash
+app.delete("/admin/users/:userId", adminMiddleware, async (req, res) => {
+  const userDir = path.join(UPLOADS_DIR, req.params.userId);
+  try {
+    await fsp.access(userDir);
+  } catch {
+    return res.status(404).send("Użytkownik nie istnieje");
+  }
+
+  try {
+    const timestamp = Date.now();
+    const dest = path.join(TRASH_DIR, `${req.params.userId}__${timestamp}`);
+    await fsp.mkdir(TRASH_DIR, { recursive: true });
+    await fsp.rename(userDir, dest);
+    fileCache.delete(req.params.userId);
+    res.send("Użytkownik przeniesiony do trash");
+  } catch (err) {
+    console.error("Błąd przy usuwaniu użytkownika:", err);
+    res.status(500).send("Nie udało się usunąć użytkownika");
+  }
+});
+
+// Cleanup trash endpoint (remove entries older than X days)
+// Protected by adminMiddleware; call it from Scheduled Job or manually
+app.post("/admin/cleanup-trash", adminMiddleware, async (req, res) => {
+  const days = parseInt(req.query.days || "30", 10);
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  try {
+    const entries = await fsp.readdir(TRASH_DIR, { withFileTypes: true });
+    let removed = 0;
+    for (const e of entries) {
+      const p = path.join(TRASH_DIR, e.name);
+      const stat = await fsp.stat(p);
+      if (stat.mtimeMs < cutoff) {
+        await fsp.rm(p, { recursive: true, force: true });
+        removed++;
+      }
+    }
+    res.json({ removed });
+  } catch (err) {
+    console.error("cleanup-trash error", err);
+    res.status(500).send("error");
+  }
+});
+
+// Register
+app.post("/register", async (req, res) => {
+  const { username, password, accountType, verificationCode } = req.body;
+  if (!username) return res.status(400).send("Brak loginu");
+
+  const userPath = path.join(UPLOADS_DIR, username);
+  try {
+    await fsp.access(userPath);
+    return res.status(409).send("Użytkownik już istnieje");
+  } catch {}
+
+  try {
+    await fsp.mkdir(userPath, { recursive: true });
     const userData = {
       username,
       accountType: accountType || "standardowe",
-      status: "active"
+      status: accountType === "zatwierdzane" ? "pending" : "active"
     };
-
     if (accountType !== "anonimowe") {
       if (!password) return res.status(400).send("Brak hasła");
       userData.password = password;
     }
-
     if (accountType === "zatwierdzane") {
-      if (!verificationCode || verificationCode.length !== 4) {
-        return res.status(400).send("Nieprawidłowy kod weryfikacyjny");
-      }
+      if (!verificationCode || verificationCode.length !== 4) return res.status(400).send("Nieprawidłowy kod weryfikacyjny");
       userData.verificationCode = verificationCode;
-      userData.status = "pending";
     }
-
-    fs.writeFileSync(path.join(userPath, "user.json"), JSON.stringify(userData, null, 2));
+    await fsp.writeFile(path.join(userPath, "user.json"), JSON.stringify(userData, null, 2));
     res.status(201).send("Użytkownik utworzony");
-  } catch (e) {
-    console.error("Błąd przy tworzeniu użytkownika:", e);
+  } catch (err) {
+    console.error("Błąd przy tworzeniu użytkownika:", err);
     res.status(500).send("Błąd serwera");
   }
 });
 
-
-app.post("/login", (req, res) => {
+// Login
+app.post("/login", async (req, res) => {
   const { username, password } = req.body;
   if (!username) return res.status(400).json({ error: "Brak loginu" });
 
-  const userPath = path.join(__dirname, "uploads", username, "user.json");
-  if (!fs.existsSync(userPath)) {
+  const userFile = path.join(UPLOADS_DIR, username, "user.json");
+  try {
+    const txt = await fsp.readFile(userFile, "utf-8");
+    const userData = JSON.parse(txt);
+    if (userData.accountType !== "anonimowe") {
+      if (!password || userData.password !== password) return res.status(401).json({ error: "Nieprawidłowe hasło" });
+    }
+    if (userData.accountType === "zatwierdzane" && userData.status !== "active") return res.status(403).json({ error: "Konto niezatwierdzone" });
+    res.status(200).json({ message: "Zalogowano" });
+  } catch {
     return res.status(404).json({ error: "Użytkownik nie istnieje" });
   }
+});
 
+// Health
+app.get("/health", (req, res) => res.json({ status: "ok" }));
+
+// Startup
+(async () => {
   try {
-    const userData = JSON.parse(fs.readFileSync(userPath, "utf-8"));
-
-    if (userData.accountType !== "anonimowe") {
-      if (!password || userData.password !== password) {
-        return res.status(401).json({ error: "Nieprawidłowe hasło" });
-      }
-    }
-
-    if (userData.accountType === "zatwierdzane" && userData.status !== "active") {
-      return res.status(403).json({ error: "Konto niezatwierdzone" });
-    }
-
-    return res.status(200).json({ message: "Zalogowano" });
+    await ensureDirs();
+    app.listen(PORT, () => {
+      console.log(`Serwer działa na porcie ${PORT}`);
+    });
   } catch (e) {
-    console.error("Błąd przy logowaniu:", e);
-    return res.status(500).json({ error: "Błąd serwera" });
+    console.error("Init error", e);
+    process.exit(1);
   }
-});
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Serwer działa na porcie ${port}`);
-});
-
+})();
