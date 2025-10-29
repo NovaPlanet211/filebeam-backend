@@ -6,13 +6,10 @@
     "start": "node server.js"
   },
   "dependencies": {
-  "compression": "^1.7.4",
-  "cors": "^2.8.5",
-  "express": "^4.21.2",
-  "multer": "^2.0.2",
-  "megajs": "github:tonistiigi/megajs"
-
+    "compression": "^1.7.4",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "megajs": "github:tonistiigi/megajs"
   }
 }
-
-
