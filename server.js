@@ -1,4 +1,7 @@
 // server.js
+const { uploadBufferToMega, listUserFiles, deleteUserFile } = require("./mega");
+const { streamFromMega } = require("./mega");
+const { listMegaFiles, deleteMegaFileByLink } = require("./mega");
 const express = require("express");
 const multer = require("multer");
 const fs = require("fs");
@@ -6,6 +9,7 @@ const fsp = require("fs").promises;
 const path = require("path");
 const cors = require("cors");
 const compression = require("compression");
+
 
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "BadMojo2008";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://novaplanet211.github.io";
@@ -29,41 +33,62 @@ const adminMiddleware = (req, res, next) => {
   next();
 };
 
-// Ensure base directories exist
-const ensureDirs = async () => {
-  await fsp.mkdir(UPLOADS_DIR, { recursive: true });
-  await fsp.mkdir(TRASH_DIR, { recursive: true });
-};
 
-// Multer storage using userId param
-const storage = multer.diskStorage({
-  destination: async (req, file, cb) => {
-    try {
-      const userDir = path.join(UPLOADS_DIR, req.params.userId);
-      await fsp.mkdir(userDir, { recursive: true });
-      cb(null, userDir);
-    } catch (err) {
-      cb(err);
-    }
-  },
-  filename: (req, file, cb) => cb(null, file.originalname),
-});
+
+const storage = multer.memoryStorage();
 const upload = multer({ storage });
+
 
 // Upload endpoint
 app.post("/upload/:userId", upload.single("file"), async (req, res) => {
-  fileCache.delete(req.params.userId);
-  res.send("Plik zapisany!");
+  try {
+    const megaLink = await uploadBufferToMega(req.file.buffer, req.file.originalname, req.params.userId);
+
+    const userFile = path.join(UPLOADS_DIR, req.params.userId, "user.json");
+    const userData = await readUserJson(req.params.userId) || { files: {} };
+    userData.files = userData.files || {};
+    userData.files[req.file.originalname] = megaLink;
+
+    await fsp.writeFile(userFile, JSON.stringify(userData, null, 2));
+    res.json({ success: true, megaLink });
+  } catch (err) {
+    console.error("Upload error:", err);
+    res.status(500).send("Błąd uploadu");
+  }
 });
+
+
 
 // Download endpoint (serves file without forcing attachment)
 app.get("/download/:userId/:filename", async (req, res) => {
-  const filePath = path.join(UPLOADS_DIR, req.params.userId, req.params.filename);
   try {
-    await fsp.access(filePath);
-    res.sendFile(filePath);
-  } catch {
-    res.status(404).send("Plik nie istnieje");
+    const userData = await readUserJson(req.params.userId);
+    const megaLink = userData?.files?.[req.params.filename];
+    if (!megaLink) return res.status(404).send("Brak linku do pliku");
+
+    const fileStream = await streamFromMega(megaLink);
+    res.setHeader("Content-Disposition", `attachment; filename="${req.params.filename}"`);
+    fileStream.pipe(res);
+  } catch (err) {
+    console.error("Download error:", err);
+    res.status(500).send("Błąd pobierania");
+  }
+});
+
+
+app.get("/admin/mega-files", adminMiddleware, async (req, res) => {
+  try {
+    const files = await listMegaFiles();
+    const result = Object.entries(files).map(([name, file]) => ({
+      name,
+      size: file.size,
+      created: file.timestamp,
+      link: file.link,
+    }));
+    res.json(result);
+  } catch (err) {
+    console.error("Listowanie Mega error:", err);
+    res.status(500).send("Błąd listowania");
   }
 });
 
@@ -106,9 +131,8 @@ app.get("/files/:userId", async (req, res) => {
   if (cached && now - cached.ts < CACHE_TTL_MS) return res.json(cached.files);
 
   try {
-    const all = await fsp.readdir(userDir);
-    const visible = all.filter(f => f !== "user.json");
-    fileCache.set(userId, { files: visible, ts: now });
+    const files = await listUserFiles(userId);
+    res.json(files);
     res.json(visible);
   } catch {
     res.status(500).send("Błąd serwera");
@@ -155,29 +179,33 @@ app.post("/admin/approve/:username", adminMiddleware, async (req, res) => {
     res.status(500).send("Błąd serwera");
   }
 });
+app.post("/admin/delete-mega", adminMiddleware, async (req, res) => {
+  const { link } = req.body;
+  if (!link || !link.startsWith("https://mega.nz/")) {
+    return res.status(400).send("Nieprawidłowy link");
+  }
+
+  try {
+    await deleteMegaFileByLink(link);
+    res.send("Plik usunięty z Mega");
+  } catch (err) {
+    console.error("Usuwanie Mega error:", err);
+    res.status(500).send("Błąd usuwania");
+  }
+});
 
 // Move single file to trash
 app.delete("/files/:userId/:fileName", adminMiddleware, async (req, res) => {
-  const { userId, fileName } = req.params;
-  const filePath = path.join(UPLOADS_DIR, userId, fileName);
   try {
-    await fsp.access(filePath);
-  } catch {
-    return res.status(404).send("Plik nie istnieje");
-  }
-
-  try {
-    await fsp.mkdir(path.join(TRASH_DIR, userId), { recursive: true });
-    const timestamp = Date.now();
-    const dest = path.join(TRASH_DIR, userId, `${timestamp}__${fileName}`);
-    await fsp.rename(filePath, dest);
-    fileCache.delete(userId);
-    res.send("Plik przeniesiony do trash");
+    await deleteUserFile(req.params.userId, req.params.fileName);
+    res.send("Plik usunięty z Mega");
   } catch (err) {
-    console.error("Błąd przy usuwaniu pliku:", err);
-    res.status(500).send("Nie udało się usunąć pliku");
+    console.error("Usuwanie error:", err);
+    res.status(500).send("Błąd usuwania");
   }
 });
+
+
 
 // Move user to trash
 app.delete("/admin/users/:userId", adminMiddleware, async (req, res) => {
