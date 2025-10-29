@@ -1,91 +1,88 @@
-const mega = require("megajs");
+const Mega = require("mega");
 const stream = require("stream");
 
-// 🔐 Autoryzacja do konta Mega
-const getMegaStorage = async () => {
-  return await mega.Storage.fromCredentials(
-    process.env.MEGA_EMAIL,
-    process.env.MEGA_PASSWORD
-  );
-};
-
-// 📁 Pobierz lub utwórz folder użytkownika
-const getUserFolder = async (username) => {
-  const storage = await getMegaStorage();
-  let folder = storage.files[username];
-
-  if (!folder) {
-    console.log("📁 Tworzę nowy folder dla:", username);
-    folder = storage.createFolder(username);
-    await new Promise((resolve, reject) => {
-      folder.on("complete", resolve);
-      folder.on("error", reject);
-    });
-  } else {
-    console.log("📁 Folder już istnieje dla:", username);
-  }
-
-  return folder;
-};
-
-// 🔼 Upload bufora do folderu użytkownika
-const uploadBufferToMega = async (buffer, filename, username) => {
-  console.log("🔼 Start upload:", filename, "dla użytkownika:", username);
-
-  const folder = await getUserFolder(username);
-  const bufferStream = new stream.PassThrough();
-  bufferStream.end(buffer);
-
-  const file = folder.upload(filename, bufferStream);
-
-  await new Promise((resolve, reject) => {
-    file.on("complete", () => {
-      console.log("✅ Upload zakończony:", filename);
-      console.log("🔗 Link do pliku:", file.link);
-      resolve();
-    });
-    file.on("error", (err) => {
-      console.error("❌ Błąd uploadu:", err);
-      reject(err);
-    });
+// 🔐 Logowanie do Mega
+const getMegaSession = () => {
+  return Mega({
+    email: process.env.MEGA_EMAIL,
+    password: process.env.MEGA_PASSWORD,
   });
-
-  return file.link;
 };
 
-// 🔽 Streamowanie pliku z Mega (do pobrania)
-const streamFromMega = async (fileUrl) => {
-  const file = mega.File.fromURL(fileUrl);
-  return file.download();
+// 🔼 Upload bufora do Mega
+const uploadBufferToMega = async (buffer, filename, username) => {
+  const storage = getMegaSession();
+
+  return new Promise((resolve, reject) => {
+    storage.once("ready", () => {
+      const fileStream = new stream.PassThrough();
+      fileStream.end(buffer);
+
+      const file = storage.upload({ name: `${username}/${filename}` }, fileStream);
+
+      file.on("complete", () => {
+        console.log("✅ Upload zakończony:", file.name);
+        resolve(file.link);
+      });
+
+      file.on("error", reject);
+    });
+
+    storage.once("error", reject);
+  });
 };
 
 // 📂 Listowanie plików użytkownika
 const listUserFiles = async (username) => {
-  const folder = await getUserFolder(username);
-  return Object.entries(folder.children).map(([name, file]) => ({
-    name,
-    size: file.size,
-    created: file.timestamp,
-    link: file.link,
-  }));
+  const storage = getMegaSession();
+
+  return new Promise((resolve, reject) => {
+    storage.once("ready", () => {
+      const files = Object.values(storage.files)
+        .filter(f => f.name.startsWith(`${username}/`))
+        .map(f => ({
+          name: f.name.replace(`${username}/`, ""),
+          size: f.size,
+          created: f.timestamp,
+          link: f.link,
+        }));
+      resolve(files);
+    });
+
+    storage.once("error", reject);
+  });
+};
+
+// 🔽 Streamowanie pliku z Mega
+const streamFromMega = async (fileUrl) => {
+  const file = Mega.File.fromURL(fileUrl);
+  return file.download();
 };
 
 // 🗑️ Usuwanie pliku użytkownika po nazwie
 const deleteUserFile = async (username, filename) => {
-  const folder = await getUserFolder(username);
-  const file = folder.children[filename];
-  if (!file) throw new Error("Plik nie istnieje");
+  const storage = getMegaSession();
 
-  await new Promise((resolve, reject) => {
-    file.delete((err) => (err ? reject(err) : resolve()));
+  return new Promise((resolve, reject) => {
+    storage.once("ready", () => {
+      const fullName = `${username}/${filename}`;
+      const file = Object.values(storage.files).find(f => f.name === fullName);
+      if (!file) return reject(new Error("Plik nie istnieje"));
+
+      file.delete((err) => {
+        if (err) return reject(err);
+        console.log("🗑️ Usunięto plik:", fullName);
+        resolve();
+      });
+    });
+
+    storage.once("error", reject);
   });
-
-  console.log("🗑️ Usunięto plik:", filename, "dla użytkownika:", username);
 };
 
 module.exports = {
   uploadBufferToMega,
-  streamFromMega,
   listUserFiles,
+  streamFromMega,
   deleteUserFile,
 };
