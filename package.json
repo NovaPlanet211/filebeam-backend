@@ -10,6 +10,6 @@
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "multer": "^2.0.2",
-    "mega": "github:qgustavor/mega"
+    "megajs": "https://github.com/qgustavor/megajs.git"
   }
 }
