@@ -2,7 +2,6 @@ FROM node:18-alpine
 
 WORKDIR /app
 
-# system deps for some native builds (kept minimal)
 RUN apk add --no-cache git
 
 COPY package.json package-lock.json* ./
