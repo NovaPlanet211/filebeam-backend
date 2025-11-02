@@ -1,0 +1,15 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# system deps for some native builds (kept minimal)
+RUN apk add --no-cache git
+
+COPY package.json package-lock.json* ./
+RUN npm ci --prefer-offline --no-audit --progress=false
+
+COPY . .
+
+ENV PORT=3000
+EXPOSE 3000
+CMD ["node", "server.js"]
