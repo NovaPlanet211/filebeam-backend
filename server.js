@@ -1,102 +1,45 @@
-// server.js
-const { uploadBufferToMega, listUserFiles, deleteUserFile } = require("./mega");
-const { streamFromMega } = require("./mega");
-const { listMegaFiles, deleteMegaFileByLink } = require("./mega");
+require("dotenv").config();
 const express = require("express");
-const multer = require("multer");
-const fs = require("fs");
-const fsp = require("fs").promises;
-const path = require("path");
 const cors = require("cors");
 const compression = require("compression");
+const path = require("path");
+const fs = require("fs");
+const fsp = require("fs").promises;
 
+// R2 helpers
+const { getSignedPutUrl, getSignedGetUrl, s3 } = require("./r2");
 
+// Konfiguracja
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "BadMojo2008";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "https://novaplanet211.github.io";
-const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, "uploads"); // on Render, set to /data/uploads if persistent disk mounted
-const TRASH_DIR = process.env.TRASH_DIR || path.join(__dirname, "trash");       // on Render, set to /data/trash
+const UPLOADS_DIR = process.env.UPLOADS_DIR || path.join(__dirname, "uploads"); // dla user.json/metadanych
+const TRASH_DIR = process.env.TRASH_DIR || path.join(__dirname, "trash");
 const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL_MS || "10000", 10);
 const PORT = process.env.PORT || 3000;
 
+// App
 const app = express();
 app.use(cors({ origin: ALLOWED_ORIGIN, credentials: true }));
 app.use(express.json());
 app.use(compression());
 
-// Simple in-memory cache for file lists
+// In-memory cache
 const fileCache = new Map();
 
-// Admin middleware (used on /admin/* and cleanup endpoints)
+// Admin middleware
 const adminMiddleware = (req, res, next) => {
   const password = req.headers["x-admin-password"];
   if (password !== ADMIN_PASSWORD) return res.status(403).send("Brak dostępu");
   next();
 };
 
+// Helpers: katalogi i user.json
+async function ensureDirs() {
+  await fsp.mkdir(UPLOADS_DIR, { recursive: true });
+  await fsp.mkdir(TRASH_DIR, { recursive: true });
+}
 
-
-const storage = multer.memoryStorage();
-const upload = multer({ storage });
-
-
-// Upload endpoint
-app.post("/upload/:userId", upload.single("file"), async (req, res) => {
-  try {
-    const megaLink = await uploadBufferToMega(req.file.buffer, req.file.originalname, req.params.userId);
-
-    const userFile = path.join(UPLOADS_DIR, req.params.userId, "user.json");
-    const userData = await readUserJson(req.params.userId) || { files: {} };
-    userData.files = userData.files || {};
-    userData.files[req.file.originalname] = megaLink;
-
-    await fsp.writeFile(userFile, JSON.stringify(userData, null, 2));
-    res.json({ success: true, megaLink });
-  } catch (err) {
-    console.error("Upload error:", err);
-    res.status(500).send("Błąd uploadu");
-  }
-});
-
-
-
-// Download endpoint (serves file without forcing attachment)
-app.get("/download/:userId/:filename", async (req, res) => {
-  try {
-    const userData = await readUserJson(req.params.userId);
-    const megaLink = userData?.files?.[req.params.filename];
-    if (!megaLink) return res.status(404).send("Brak linku do pliku");
-
-    const fileStream = await streamFromMega(megaLink);
-    res.setHeader("Content-Disposition", `attachment; filename="${req.params.filename}"`);
-    fileStream.pipe(res);
-  } catch (err) {
-    console.error("Download error:", err);
-    res.status(500).send("Błąd pobierania");
-  }
-});
-
-
-app.get("/admin/mega-files", adminMiddleware, async (req, res) => {
-  try {
-    const files = await listMegaFiles();
-    const result = Object.entries(files).map(([name, file]) => ({
-      name,
-      size: file.size,
-      created: file.timestamp,
-      link: file.link,
-    }));
-    res.json(result);
-  } catch (err) {
-    console.error("Listowanie Mega error:", err);
-    res.status(500).send("Błąd listowania");
-  }
-});
-
-// Static files (allow direct download links)
-app.use("/files", express.static(UPLOADS_DIR));
-
-// Helper: read user.json safely
-const readUserJson = async (username) => {
+async function readUserJson(username) {
   const file = path.join(UPLOADS_DIR, username, "user.json");
   try {
     const txt = await fsp.readFile(file, "utf-8");
@@ -104,26 +47,87 @@ const readUserJson = async (username) => {
   } catch {
     return null;
   }
-};
+}
 
-// List files with access rules and caching
+async function writeUserJson(username, data) {
+  const userDir = path.join(UPLOADS_DIR, username);
+  await fsp.mkdir(userDir, { recursive: true });
+  const file = path.join(userDir, "user.json");
+  await fsp.writeFile(file, JSON.stringify(data, null, 2));
+}
+
+// R2 ops (list/delete)
+async function listR2Objects(prefix) {
+  const params = { Bucket: process.env.R2_BUCKET, Prefix: prefix };
+  const data = await s3.listObjectsV2(params).promise();
+  return (data.Contents || []).map(obj => ({
+    key: obj.Key,
+    size: obj.Size,
+    lastModified: obj.LastModified,
+  }));
+}
+
+async function deleteR2ObjectByKey(key) {
+  await s3.deleteObject({ Bucket: process.env.R2_BUCKET, Key: key }).promise();
+}
+
+// -----------------------
+// Upload przez signed URL
+// -----------------------
+
+app.get("/signed-url/:userId", async (req, res) => {
+  const { filename, contentType } = req.query;
+  const userId = req.params.userId;
+  if (!filename || !contentType) return res.status(400).send("Brak filename lub contentType");
+
+  const key = `${userId}/${filename}`;
+  const url = getSignedPutUrl(key, contentType);
+
+  // Zapisz metadane w user.json (bez przenoszenia pliku przez backend)
+  const userData = (await readUserJson(userId)) || { username: userId, accountType: "standardowe", status: "active", files: {} };
+  userData.files = userData.files || {};
+  userData.files[filename] = { key, lastSignedAt: Date.now() };
+  await writeUserJson(userId, userData);
+
+  res.json({ url, key });
+});
+
+// Pobieranie: zwracamy signed GET (lub redirect)
+app.get("/download/:userId/:filename", async (req, res) => {
+  try {
+    const userData = await readUserJson(req.params.userId);
+    const entry = userData?.files?.[req.params.filename];
+    if (!entry?.key) return res.status(404).send("Brak wpisu o pliku");
+
+    const signedGet = getSignedGetUrl(entry.key);
+    // Możesz użyć redirect:
+    // return res.redirect(signedGet);
+    res.json({ url: signedGet });
+  } catch (err) {
+    console.error("Download error:", err);
+    res.status(500).send("Błąd pobierania");
+  }
+});
+
+// -----------------------
+// Listowanie plików usera
+// -----------------------
+
 app.get("/files/:userId", async (req, res) => {
   const { viewer } = req.query;
   const userId = req.params.userId;
-  const userDir = path.join(UPLOADS_DIR, userId);
 
-  try {
-    await fsp.access(userDir);
-  } catch {
-    return res.status(404).send("Użytkownik nie istnieje");
-  }
+  // Musi istnieć user.json
+  const userData = await readUserJson(userId);
+  if (!userData) return res.status(404).send("Użytkownik nie istnieje");
 
   if (!viewer) return res.status(403).send("Brak dostępu");
 
   if (viewer !== userId) {
     const viewerData = await readUserJson(viewer);
     if (!viewerData) return res.status(403).send("Brak dostępu");
-    if (viewerData.accountType === "anonimowe") return res.status(403).send("Konto anonimowe nie może przeglądać cudzych plików");
+    if (viewerData.accountType === "anonimowe")
+      return res.status(403).send("Konto anonimowe nie może przeglądać cudzych plików");
   }
 
   const now = Date.now();
@@ -131,25 +135,38 @@ app.get("/files/:userId", async (req, res) => {
   if (cached && now - cached.ts < CACHE_TTL_MS) return res.json(cached.files);
 
   try {
-    const files = await listUserFiles(userId);
-    res.json(files);
-    res.json(visible);
-  } catch {
-    res.status(500).send("Błąd serwera");
+    // Listowanie z R2 po prefiksie usera
+    const objects = await listR2Objects(`${userId}/`);
+    const files = objects.map(o => ({
+      filename: o.key.replace(`${userId}/`, ""),
+      key: o.key,
+      size: o.size,
+      lastModified: o.lastModified,
+    }));
+
+    fileCache.set(userId, { ts: now, files });
+    return res.json(files);
+  } catch (err) {
+    console.error("List files error:", err);
+    return res.status(500).send("Błąd serwera");
   }
 });
 
-// Admin routes (protected by adminMiddleware)
-app.get("/admin/users", adminMiddleware, async (req, res) => {
+// -----------------------
+// Admin: lista obiektów R2
+// -----------------------
+
+app.get("/admin/r2-files", adminMiddleware, async (req, res) => {
   try {
-    const entries = await fsp.readdir(UPLOADS_DIR, { withFileTypes: true });
-    const users = entries.filter(e => e.isDirectory()).map(e => e.name);
-    res.json(users);
-  } catch {
-    res.json([]);
+    const data = await listR2Objects("");
+    res.json(data);
+  } catch (err) {
+    console.error("Listowanie R2 error:", err);
+    res.status(500).send("Błąd listowania");
   }
 });
 
+// Admin: pending users
 app.get("/admin/pending-users", adminMiddleware, async (req, res) => {
   try {
     const entries = await fsp.readdir(UPLOADS_DIR, { withFileTypes: true });
@@ -165,6 +182,7 @@ app.get("/admin/pending-users", adminMiddleware, async (req, res) => {
   }
 });
 
+// Admin: approve user
 app.post("/admin/approve/:username", adminMiddleware, async (req, res) => {
   const userFile = path.join(UPLOADS_DIR, req.params.username, "user.json");
   try {
@@ -179,35 +197,40 @@ app.post("/admin/approve/:username", adminMiddleware, async (req, res) => {
     res.status(500).send("Błąd serwera");
   }
 });
-app.post("/admin/delete-mega", adminMiddleware, async (req, res) => {
-  const { link } = req.body;
-  if (!link || !link.startsWith("https://mega.nz/")) {
-    return res.status(400).send("Nieprawidłowy link");
-  }
 
+// Admin: delete file by key (R2) — zamiana z Mega linków
+app.post("/admin/delete-r2", adminMiddleware, async (req, res) => {
+  const { key } = req.body;
+  if (!key) return res.status(400).send("Brak key");
   try {
-    await deleteMegaFileByLink(link);
-    res.send("Plik usunięty z Mega");
+    await deleteR2ObjectByKey(key);
+    res.send("Plik usunięty z R2");
   } catch (err) {
-    console.error("Usuwanie Mega error:", err);
+    console.error("Usuwanie R2 error:", err);
     res.status(500).send("Błąd usuwania");
   }
 });
 
-// Move single file to trash
+// Delete single file (user) — usuń z R2 i z user.json
 app.delete("/files/:userId/:fileName", adminMiddleware, async (req, res) => {
+  const { userId, fileName } = req.params;
   try {
-    await deleteUserFile(req.params.userId, req.params.fileName);
-    res.send("Plik usunięty z Mega");
+    const userData = await readUserJson(userId);
+    const entry = userData?.files?.[fileName];
+    if (!entry?.key) return res.status(404).send("Brak wpisu o pliku");
+
+    await deleteR2ObjectByKey(entry.key);
+    delete userData.files[fileName];
+    await writeUserJson(userId, userData);
+    fileCache.delete(userId);
+    res.send("Plik usunięty z R2");
   } catch (err) {
     console.error("Usuwanie error:", err);
     res.status(500).send("Błąd usuwania");
   }
 });
 
-
-
-// Move user to trash
+// Admin: move user to trash (lokalny katalog)
 app.delete("/admin/users/:userId", adminMiddleware, async (req, res) => {
   const userDir = path.join(UPLOADS_DIR, req.params.userId);
   try {
@@ -229,8 +252,7 @@ app.delete("/admin/users/:userId", adminMiddleware, async (req, res) => {
   }
 });
 
-// Cleanup trash endpoint (remove entries older than X days)
-// Protected by adminMiddleware; call it from Scheduled Job or manually
+// Admin: cleanup trash (starsze niż X dni)
 app.post("/admin/cleanup-trash", adminMiddleware, async (req, res) => {
   const days = parseInt(req.query.days || "30", 10);
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
@@ -268,7 +290,8 @@ app.post("/register", async (req, res) => {
     const userData = {
       username,
       accountType: accountType || "standardowe",
-      status: accountType === "zatwierdzane" ? "pending" : "active"
+      status: accountType === "zatwierdzane" ? "pending" : "active",
+      files: {},
     };
     if (accountType !== "anonimowe") {
       if (!password) return res.status(400).send("Brak hasła");
@@ -278,7 +301,7 @@ app.post("/register", async (req, res) => {
       if (!verificationCode || verificationCode.length !== 4) return res.status(400).send("Nieprawidłowy kod weryfikacyjny");
       userData.verificationCode = verificationCode;
     }
-    await fsp.writeFile(path.join(userPath, "user.json"), JSON.stringify(userData, null, 2));
+    await writeUserJson(username, userData);
     res.status(201).send("Użytkownik utworzony");
   } catch (err) {
     console.error("Błąd przy tworzeniu użytkownika:", err);
@@ -291,18 +314,16 @@ app.post("/login", async (req, res) => {
   const { username, password } = req.body;
   if (!username) return res.status(400).json({ error: "Brak loginu" });
 
-  const userFile = path.join(UPLOADS_DIR, username, "user.json");
-  try {
-    const txt = await fsp.readFile(userFile, "utf-8");
-    const userData = JSON.parse(txt);
-    if (userData.accountType !== "anonimowe") {
-      if (!password || userData.password !== password) return res.status(401).json({ error: "Nieprawidłowe hasło" });
-    }
-    if (userData.accountType === "zatwierdzane" && userData.status !== "active") return res.status(403).json({ error: "Konto niezatwierdzone" });
-    res.status(200).json({ message: "Zalogowano" });
-  } catch {
-    return res.status(404).json({ error: "Użytkownik nie istnieje" });
+  const userData = await readUserJson(username);
+  if (!userData) return res.status(404).json({ error: "Użytkownik nie istnieje" });
+
+  if (userData.accountType !== "anonimowe") {
+    if (!password || userData.password !== password) return res.status(401).json({ error: "Nieprawidłowe hasło" });
   }
+  if (userData.accountType === "zatwierdzane" && userData.status !== "active")
+    return res.status(403).json({ error: "Konto niezatwierdzone" });
+
+  res.status(200).json({ message: "Zalogowano" });
 });
 
 // Health
